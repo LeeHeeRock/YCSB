@@ -35,6 +35,12 @@ import java.util.concurrent.locks.ReentrantLock;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
+//For generation uuid
+import java.util.UUID;
+
+//For file I/O
+import java.io.FileOutputStream;
+
 /**
  * RocksDB binding for <a href="http://rocksdb.org/">RocksDB</a>.
  *
@@ -45,9 +51,23 @@ public class RocksDBClient extends DB {
   static final String PROPERTY_ROCKSDB_DIR = "rocksdb.dir";
   static final String PROPERTY_ROCKSDB_OPTIONS_FILE = "rocksdb.optionsfile";
   private static final String COLUMN_FAMILY_NAMES_FILENAME = "CF_NAMES";
-
+  
   private static final Logger LOGGER = LoggerFactory.getLogger(RocksDBClient.class);
 
+ //Initialized in init method
+  private static String outPutFileName;
+  private static BufferedWriter bWriter;
+  private static FileWriter fWriter;  
+  
+  private static FileOutputStream fos;
+  private static DataOutputStream dos;
+  
+  //TODO::ReConsider where to get uuid.
+  private static final UUID MY_UUID = UUID.randomUUID();
+  
+  //FileOutput Stream
+  private static FileOutputStream myOfs;  
+  
   @GuardedBy("RocksDBClient.class") private static Path rocksDbDir = null;
   @GuardedBy("RocksDBClient.class") private static Path optionsFile = null;
   @GuardedBy("RocksDBClient.class") private static RocksObject dbOptions = null;
@@ -73,8 +93,14 @@ public class RocksDBClient extends DB {
         try {
           if (optionsFile != null) {
             rocksDb = initRocksDBWithOptionsFile();
+            outPutFileName = "/tmp/ycsb_trace/workloada/trace_" + MY_UUID.toString();
+            fos = new FileOutputStream(outPutFileName, true); 
+            dos = new DataOutputStream(fos);
           } else {
             rocksDb = initRocksDB();
+            outPutFileName = "/tmp/ycsb_trace/workloada/trace_" + MY_UUID.toString();
+            fos = new FileOutputStream(outPutFileName, true);
+            dos = new DataOutputStream(fos); 
           }
         } catch (final IOException | RocksDBException e) {
           throw new DBException(e);
@@ -212,13 +238,35 @@ public class RocksDBClient extends DB {
   @Override
   public Status read(final String table, final String key, final Set<String> fields,
       final Map<String, ByteIterator> result) {
+    int op = 2;
+    int tabLen = table.length();
+    int keyLen = key.length();
+    int valLen = 0;
+    int pairs = 0;
+    int recCnt = 0;
+    try{//Print out Meta data
+      dos.writeInt(op);
+      dos.writeInt(tabLen);
+      dos.writeInt(keyLen);
+      dos.writeInt(valLen);
+      dos.writeInt(pairs);
+      dos.writeInt(recCnt);
+    }catch(IOException e){
+      System.out.println("Print metadata Error in read OP\n");
+    }   
     try {
       if (!COLUMN_FAMILIES.containsKey(table)) {
         createColumnFamily(table);
       }
-
+      try{//Print out CF and key data
+        dos.write(table.getBytes());
+        dos.write(key.getBytes());
+      } catch(IOException e){
+        System.out.println("ERROR in Read\n");
+      }
       final ColumnFamilyHandle cf = COLUMN_FAMILIES.get(table).getHandle();
       final byte[] values = rocksDb.get(cf, key.getBytes(UTF_8));
+      
       if(values == null) {
         return Status.NOT_FOUND;
       }
@@ -233,11 +281,32 @@ public class RocksDBClient extends DB {
   @Override
   public Status scan(final String table, final String startkey, final int recordcount, final Set<String> fields,
         final Vector<HashMap<String, ByteIterator>> result) {
+    int op = 3;
+    int tabLen = table.length();
+    int keyLen = startkey.length();
+    int valLen = 0;
+    int pairs = 0;
+    int recCnt = recordcount;
+    try{
+      dos.writeInt(op);
+      dos.writeInt(tabLen);
+      dos.writeInt(keyLen);
+      dos.writeInt(valLen);
+      dos.writeInt(pairs);
+      dos.writeInt(recCnt);
+    }catch(IOException e){
+      System.out.println("Print metadata Error in scan OP\n");
+    }
     try {
       if (!COLUMN_FAMILIES.containsKey(table)) {
         createColumnFamily(table);
       }
-
+      try{//Print out CF and Start-key data
+        dos.write(table.getBytes());
+        dos.write(startkey.getBytes());
+      } catch(IOException e){
+        System.out.println("ERROR in Read\n");
+      }
       final ColumnFamilyHandle cf = COLUMN_FAMILIES.get(table).getHandle();
       try(final RocksIterator iterator = rocksDb.newIterator(cf)) {
         int iterations = 0;
@@ -260,28 +329,56 @@ public class RocksDBClient extends DB {
   @Override
   public Status update(final String table, final String key, final Map<String, ByteIterator> values) {
     //TODO(AR) consider if this would be faster with merge operator
-
+    int op = 0;
+    int tabLen = table.length();
+    int keyLen = key.length();
+    int valLen = getValSize(values);
+    int pairs = values.size();
+    int recCnt = 0;
+    try{//Print out Meta data
+      dos.writeInt(op);
+      dos.writeInt(tabLen);
+      dos.writeInt(keyLen);
+      dos.writeInt(valLen);
+      dos.writeInt(pairs);
+      dos.writeInt(recCnt);
+    }catch(IOException e){
+      System.out.println("Print metadata Error in update OP\n");
+    }
     try {
       if (!COLUMN_FAMILIES.containsKey(table)) {
         createColumnFamily(table);
       }
-
       final ColumnFamilyHandle cf = COLUMN_FAMILIES.get(table).getHandle();
       final Map<String, ByteIterator> result = new HashMap<>();
+      // do not need to tracing current data.
       final byte[] currentValues = rocksDb.get(cf, key.getBytes(UTF_8));
+      final String curValString = new String(currentValues);
       if(currentValues == null) {
         return Status.NOT_FOUND;
       }
       deserializeValues(currentValues, null, result);
-
       //update
       result.putAll(values);
-
       //store
       rocksDb.put(cf, key.getBytes(UTF_8), serializeValues(result));
-
+      for(final Map.Entry<String, ByteIterator> value : values.entrySet()) {
+        value.getValue().reset();
+        String keyString = new String(value.getKey().getBytes(UTF_8));
+        String valueString = value.getValue().toString();
+        int attrSize = keyString.length();
+        int valueSize = valueString.length();
+        try{
+          //print out real YCSB input data
+          dos.writeInt(attrSize);
+          dos.write(keyString.getBytes());
+          dos.writeInt(valueSize);
+          dos.write(valueString.getBytes());
+        } catch(IOException e){
+          System.out.println("I/O ERROR in update OP\n");
+        }
+      }
       return Status.OK;
-
     } catch(final RocksDBException | IOException e) {
       LOGGER.error(e.getMessage(), e);
       return Status.ERROR;
@@ -290,14 +387,50 @@ public class RocksDBClient extends DB {
 
   @Override
   public Status insert(final String table, final String key, final Map<String, ByteIterator> values) {
+    int op = 0;
+    int tabLen = table.length();
+    int keyLen = key.length();
+    int valLen = getValSize(values);
+    int pairs = values.size();
+    int recCnt = 0;
+    try{//Print out Meta data
+      dos.writeInt(op);
+      dos.writeInt(tabLen);
+      dos.writeInt(keyLen);
+      dos.writeInt(valLen);
+      dos.writeInt(pairs);
+      dos.writeInt(recCnt);
+    }catch(IOException e){
+      System.out.println("Print metadata Error in Insert OP\n");
+    }
     try {
       if (!COLUMN_FAMILIES.containsKey(table)) {
         createColumnFamily(table);
       }
-
       final ColumnFamilyHandle cf = COLUMN_FAMILIES.get(table).getHandle();
       rocksDb.put(cf, key.getBytes(UTF_8), serializeValues(values));
-
+      try{
+        //Print out Operation and CF inforamtion
+        dos.write(table.getBytes());
+        dos.write(key.getBytes());
+      } catch(IOException e){
+        System.out.println("I/O ERROR in insert method\n");
+      }
+      for(final Map.Entry<String, ByteIterator> value : values.entrySet()) {
+        value.getValue().reset();
+        String keyString = new String(value.getKey().getBytes(UTF_8));
+        String valueString = value.getValue().toString();
+        int attrSize = keyString.length();
+        int valueSize = valueString.length();
+        try{//print out real YCSB input data
+          dos.writeInt(attrSize);
+          dos.write(keyString.getBytes());
+          dos.writeInt(valueSize);
+          dos.write(valueString.getBytes());
+        } catch(IOException e){
+          System.out.println("I/O ERROR in insert OP\n");
+        }
+      }
       return Status.OK;
     } catch(final RocksDBException | IOException e) {
       LOGGER.error(e.getMessage(), e);
@@ -307,14 +440,33 @@ public class RocksDBClient extends DB {
 
   @Override
   public Status delete(final String table, final String key) {
+    int op = 1;
+    int tabLen = table.length();
+    int keyLen = key.length();
+    int valLen = 0;
+    int pairs = 0;
+    int recCnt = 0;
+    try{//Print out Meta data
+      dos.writeInt(op);
+      dos.writeInt(tabLen);
+      dos.writeInt(keyLen);
+      dos.writeInt(valLen);
+      dos.writeInt(pairs);
+      dos.writeInt(recCnt);
+    }catch(IOException e){
+      System.out.println("Print metadata Error in Insert OP\n");
+    }
     try {
       if (!COLUMN_FAMILIES.containsKey(table)) {
         createColumnFamily(table);
       }
-
-      final ColumnFamilyHandle cf = COLUMN_FAMILIES.get(table).getHandle();
-      rocksDb.delete(cf, key.getBytes(UTF_8));
-
+      try{//Print out CF and key data
+        dos.write(table.getBytes());
+        dos.write(key.getBytes());
+        final ColumnFamilyHandle cf = COLUMN_FAMILIES.get(table).getHandle();
+      } catch(IOException e){
+        System.out.println("ERROR in DELETE\n");
+      }
       return Status.OK;
     } catch(final RocksDBException e) {
       LOGGER.error(e.getMessage(), e);
@@ -445,6 +597,17 @@ public class RocksDBClient extends DB {
     } finally {
       l.unlock();
     }
+  }
+  
+  private int getValSize(final Map<String, ByteIterator> values){
+    int ret = 0;
+    for(final Map.Entry<String, ByteIterator> value : values.entrySet()) {
+      value.getValue().reset();
+      String keyString = new String(value.getKey().getBytes(UTF_8));
+      String valueString = value.getValue().toString();
+      ret += keyString.length() + valueString.length();
+    }
+    return ret;
   }
 
   private static final class ColumnFamily {
